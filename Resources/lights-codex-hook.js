@@ -37,8 +37,13 @@ function sessionFromTranscript(transcriptPath) {
   return match ? match[1] : null;
 }
 
-function stateFor(event) {
+function stateFor(event, payload = {}) {
   if (event === "PermissionRequest") return "permission";
+  if (event === "PreToolUse") {
+    const name = String(payload.tool_name || "").split(".").pop();
+    if (["request_permissions", "request_user_input", "request_user_input_async"].includes(name)
+        || payload.tool_input?.sandbox_permissions === "require_escalated") return "permission";
+  }
   if (event === "SessionStart") return "idle";
   if (event === "Stop" || event === "SessionEnd") return "idle";
   if (event === "UserPromptSubmit" || event === "PreToolUse" || event === "PostToolUse") {
@@ -76,7 +81,7 @@ async function main() {
 
   const event = text(payload.hook_event_name) || text(payload.event);
   if (!event || (event === "Stop" && payload.stop_hook_active === true)) return;
-  const state = stateFor(event);
+  const state = stateFor(event, payload);
   if (!state) return;
 
   const transcriptPath = text(payload.transcript_path);
@@ -93,9 +98,12 @@ async function main() {
     ...(transcriptPath ? { transcript_path: transcriptPath } : {}),
     ...(text(payload.cwd) ? { cwd: text(payload.cwd) } : {}),
     ...(text(payload.tool_name) ? { tool_name: text(payload.tool_name) } : {}),
+    ...((text(payload.call_id) || text(payload.tool_use_id) || text(payload.tool_call_id))
+      ? { call_id: text(payload.call_id) || text(payload.tool_use_id) || text(payload.tool_call_id) } : {}),
     ...(payload.stop_hook_active === true ? { stop_hook_active: true } : {}),
   });
   await post(body);
 }
 
-main().catch(() => {});
+if (require.main === module) main().catch(() => {});
+module.exports = { stateFor };

@@ -13,6 +13,14 @@ async function snapshot(active, extra = {}) {
   assert.equal(response.status, 200);
 }
 async function sessions() { return (await fetch(base + '/sessions')).json(); }
+async function event(event, call_id, turn_id = 'approval-turn') {
+  const response = await fetch(base + '/codex-event', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: 'codex-official', session_id: 'approval-test',
+      turn_id, event, ...(call_id ? { call_id } : {}) }),
+  });
+  assert.equal(response.status, 200);
+}
 (async () => {
   try {
     for (let i = 0; i < 50; i++) {
@@ -44,6 +52,24 @@ async function sessions() { return (await fetch(base + '/sessions')).json(); }
     await delay(6200);
     await snapshot([{ ...work('a'), state: 'permission' }]);
     assert.equal((await sessions())[0].state, 'permission');
+    await snapshot([]);
+    await event('UserPromptSubmit');
+    await event('PermissionRequest', 'approval-a');
+    await event('PermissionRequest', 'approval-b');
+    await event('PostToolUse', 'unrelated');
+    assert.equal((await sessions()).find(s => s.id === 'approval-test').state, 'permission');
+    await snapshot([{ session_id: 'approval-test', turn_id: 'approval-turn', state: 'executing' }]);
+    assert.equal((await sessions()).find(s => s.id === 'approval-test').state, 'permission');
+    await event('UserPromptSubmit'); // Duplicate start for the same turn preserves approval.
+    await event('PostToolUse', 'approval-a');
+    assert.equal((await sessions()).find(s => s.id === 'approval-test').state, 'permission');
+    await event('PostToolUse', 'approval-b');
+    assert.equal((await sessions()).find(s => s.id === 'approval-test').state, 'executing');
+    await snapshot([]);
+    await event('SessionEnd');
+    await event('PermissionRequest', 'stale-approval');
+    assert.equal((await sessions()).find(s => s.id === 'approval-test').state, 'idle');
     console.log('PASS: idle retention/expiry, new task resets timer, stable order, work/approval never expire');
+    console.log('PASS: parallel official approvals, matching result, duplicate start, snapshot protection, stale turn fence');
   } finally { server.kill('SIGTERM'); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

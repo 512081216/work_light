@@ -23,6 +23,15 @@ const activeWindowMs = 15000;
 
 const rolloutCache = new Map();
 
+function newRolloutState() {
+  return {
+    offset: 0, carry: Buffer.alloc(0), activeTask: false,
+    activeTaskTurnId: null, lastActivityAt: 0,
+    pendingCalls: new Set(), pendingCells: new Map(), waitCalls: new Map(),
+    lastEvent: null, lastSentKey: null,
+  };
+}
+
 function sessionIdFromRollout(file) {
   const name = path.basename(file);
   const match = name.match(
@@ -131,16 +140,7 @@ function inspectRollout(file) {
   const ageMs = Date.now() - stat.mtimeMs;
   let state = rolloutCache.get(file);
   if (!state || stat.size < state.offset) {
-    state = {
-      offset: 0,
-      carry: Buffer.alloc(0),
-      activeTask: false,
-      activeTaskTurnId: null,
-      lastActivityAt: 0,
-      pendingCalls: new Set(),
-      lastEvent: null,
-      lastSentKey: null,
-    };
+    state = newRolloutState();
     rolloutCache.set(file, state);
   }
 
@@ -206,6 +206,8 @@ function inspectRecord(line, state) {
     state.activeTask = true;
     state.activeTaskTurnId = turnId || `jsonl-open-${occurredAt}`;
     state.pendingCalls.clear();
+    state.pendingCells.clear();
+    state.waitCalls.clear();
     state.lastActivityAt = occurredAt;
     state.lastEvent = {
       event: "event_msg:task_started",
@@ -217,6 +219,8 @@ function inspectRecord(line, state) {
     state.activeTask = false;
     state.activeTaskTurnId = null;
     state.pendingCalls.clear();
+    state.pendingCells.clear();
+    state.waitCalls.clear();
     state.lastActivityAt = occurredAt;
     state.lastEvent = {
       event: payload.type === "turn_aborted"
@@ -229,6 +233,15 @@ function inspectRecord(line, state) {
   if (record.type !== "response_item" || !state.activeTask) return;
   state.lastActivityAt = occurredAt;
   if (payload.type === "custom_tool_call" || payload.type === "function_call") {
+    const name = String(payload.name || "").split(".").pop();
+    if (name === "wait") {
+      try {
+        const args = JSON.parse(payload.arguments || payload.input || "{}");
+        if (state.pendingCells.has(String(args.cell_id))) {
+          state.waitCalls.set(payload.call_id || payload.id, String(args.cell_id));
+        }
+      } catch { /* An invalid wait must not resolve another call's approval. */ }
+    }
     if (isApprovalCall(payload)) {
       state.pendingCalls.add(payload.call_id || payload.id || "unknown");
       state.lastEvent = {
@@ -237,8 +250,24 @@ function inspectRecord(line, state) {
       };
     }
   } else if (payload.type === "custom_tool_call_output" || payload.type === "function_call_output") {
-    state.pendingCalls.delete(payload.call_id || "unknown");
-    state.lastEvent = { event: "PostToolUse", state: "executing", turnId };
+    const callId = payload.call_id || "unknown";
+    const output = typeof payload.output === "string" ? payload.output : JSON.stringify(payload.output || "");
+    const runningCell = output.match(/Script running with cell ID\s+([\w-]+)/)?.[1];
+    if (state.pendingCalls.has(callId)) {
+      if (runningCell) state.pendingCells.set(runningCell, callId);
+      else state.pendingCalls.delete(callId);
+    }
+    const waitedCell = state.waitCalls.get(callId);
+    if (waitedCell) {
+      if (!runningCell) {
+        state.pendingCalls.delete(state.pendingCells.get(waitedCell));
+        state.pendingCells.delete(waitedCell);
+      }
+      state.waitCalls.delete(callId);
+    }
+    const waiting = state.pendingCalls.size > 0;
+    state.lastEvent = { event: waiting ? "PermissionRequest" : "PostToolUse",
+      state: waiting ? "permission" : "executing", turnId: turnId || state.activeTaskTurnId };
   }
 }
 
@@ -253,9 +282,14 @@ function isApprovalCall(payload) {
   const input = typeof payload.input === "string" ? payload.input
     : typeof payload.arguments === "string" ? payload.arguments : "";
   if (name === "exec") {
-    return /\btools\.request_permissions\s*\(/.test(input)
-      || /\btools\.request_user_input(?:_async)?\s*\(/.test(input)
-      || /\bsandbox_permissions\s*["']?\s*:\s*["']require_escalated["']/.test(input);
+    // Ignore commands/comments/quoted examples mentioning an approval tool.
+    // Keep character offsets so real escalation properties can be checked.
+    const code = input.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+      match => " ".repeat(match.length));
+    return /\btools\.request_permissions\s*\(/.test(code)
+      || /\btools\.request_user_input(?:_async)?\s*\(/.test(code)
+      || [...input.matchAll(/\bsandbox_permissions\s*:\s*["']require_escalated["']/g)]
+        .some(match => code.slice(match.index).startsWith("sandbox_permissions"));
   }
   if (name === "exec_command") {
     try { return JSON.parse(input).sandbox_permissions === "require_escalated"; }
@@ -300,15 +334,16 @@ function refresh() {
   notifySnapshot(Array.from(activeBySession.values()), files);
 }
 
-refresh();
-setInterval(refresh, pollMs);
-
 function stop() {
   // Do not send idle here. Process shutdown is not evidence that Codex's
   // current turn ended, and a stale fallback process must not clear the lamp.
   process.exit(0);
 }
 
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
-
+if (require.main === module) {
+  refresh();
+  setInterval(refresh, pollMs);
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+}
+module.exports = { newRolloutState, inspectRecord, isApprovalCall };

@@ -1,0 +1,38 @@
+const assert = require('node:assert/strict');
+const { newRolloutState, inspectRecord, isApprovalCall } = require('../lights-codex-desktop-watcher');
+const { stateFor } = require('../Resources/lights-codex-hook');
+assert.equal(stateFor('PreToolUse', {tool_name: 'functions.request_permissions'}), 'permission');
+assert.equal(stateFor('PreToolUse', {tool_name: 'exec_command', tool_input: {sandbox_permissions: 'require_escalated'}}), 'permission');
+assert.equal(stateFor('PreToolUse', {tool_name: 'exec_command'}), 'executing');
+const state = newRolloutState();
+function record(payload, type = 'response_item') {
+  inspectRecord(Buffer.from(JSON.stringify({ type, timestamp: new Date().toISOString(), payload })), state);
+}
+const call = (id, input, name = 'exec') => record({ type: 'custom_tool_call', call_id: id, name, input });
+const output = (id, text) => record({ type: 'custom_tool_call_output', call_id: id, output: text });
+record({ type: 'task_started', turn_id: 'turn-1' }, 'event_msg');
+call('permission', 'await tools.request_permissions({});');
+assert.equal(state.pendingCalls.size, 1);
+output('unrelated', 'done');
+assert.equal(state.lastEvent.state, 'permission');
+output('permission', 'Script running with cell ID 12');
+assert.equal(state.pendingCalls.size, 1);
+call('wait-1', '{"cell_id":"12"}', 'wait');
+output('wait-1', 'Script running with cell ID 12');
+assert.equal(state.pendingCalls.size, 1);
+call('second-permission', 'await tools.request_permissions({});');
+call('wait-2', '{"cell_id":"12"}', 'wait');
+output('wait-2', 'Script completed');
+assert.deepEqual([...state.pendingCalls], ['second-permission']);
+output('second-permission', 'permissions granted');
+assert.equal(state.lastEvent.state, 'executing');
+assert.equal(isApprovalCall({ name: 'exec', input: 'await tools.exec_command({cmd:"echo tools.request_permissions()"});' }), false);
+assert.equal(isApprovalCall({ name: 'exec', input: '// tools.request_permissions()\nawait tools.exec_command({cmd:"ls"});' }), false);
+assert.equal(isApprovalCall({ name: 'exec', input: 'await tools.exec_command({sandbox_permissions: "require_escalated"});' }), true);
+call('pending-at-end', 'await tools.request_permissions({});');
+output('pending-at-end', 'Script running with cell ID 99');
+record({ type: 'turn_aborted', turn_id: 'turn-1' }, 'event_msg');
+assert.equal(state.pendingCalls.size, 0);
+assert.equal(state.pendingCells.size, 0);
+assert.equal(state.lastEvent.state, 'idle');
+console.log('PASS: yielded approvals, repeated waits, parallel calls, false-positive filtering, abort cleanup');

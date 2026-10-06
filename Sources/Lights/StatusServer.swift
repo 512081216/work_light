@@ -43,6 +43,7 @@ final class StatusServer {
         var generation: Int
         var lastEventAt: Date
         var awaitingOfficialApproval = false
+        var pendingOfficialApprovalKeys: Set<String> = []
     }
 
     private var codexSessions: [String: CodexSession] = [:]
@@ -50,7 +51,6 @@ final class StatusServer {
     private var sessionTitles: [String: String] = [:]
     private var codexIdleWork: [String: DispatchWorkItem] = [:]
     private let codexStopGracePeriod: TimeInterval = 5
-    private let codexPermissionGracePeriod: TimeInterval = 30
     private let conversationIdleRetentionOverride: TimeInterval?
     private var conversationIdleRetention: TimeInterval {
         conversationIdleRetentionOverride ?? LightPreferences.idleRetention()
@@ -284,6 +284,9 @@ final class StatusServer {
         let incomingState = LightsState(rawValue: (json["state"] as? String) ?? "")
         let source = normalizedIdentifier(json["source"]) ?? "codex-official"
         let stopHookActive = json["stop_hook_active"] as? Bool == true
+        let approvalKey = normalizedIdentifier(json["call_id"]).map { "call:\($0)" }
+            ?? normalizedIdentifier(json["tool_name"]).map { "tool:\($0)" }
+            ?? "unknown"
 
         stateLock.lock()
         if stopHookActive {
@@ -311,6 +314,11 @@ final class StatusServer {
         let isPermission = event == "PermissionRequest" || incomingState == .permission
         let isTerminal = event == "Stop" || event == "event_msg:task_complete"
             || event == "event_msg:turn_aborted" || event == "SessionEnd"
+
+        if !isStart, let turnID, session.closedTurnIDs.contains(turnID) {
+            stateLock.unlock()
+            return Response(status: "200 OK", body: "stale")
+        }
 
         if source == "codex-jsonl" {
             session.hasJSONLActivity = true
@@ -345,7 +353,10 @@ final class StatusServer {
         }
 
         if isStart {
-            session.awaitingOfficialApproval = false
+            if turnID == nil || session.currentTurnID != turnID {
+                session.awaitingOfficialApproval = false
+                session.pendingOfficialApprovalKeys.removeAll()
+            }
             cancelCodexIdleLocked(sessionID)
             session.currentTurnID = turnID ?? UUID().uuidString
             if source == "codex-jsonl", event == "event_msg:task_started" {
@@ -356,8 +367,12 @@ final class StatusServer {
             session.generation += 1
             session.state = event == "event_msg:task_started" || incomingState != .idle
                 ? .executing : .idle
+            if session.awaitingOfficialApproval { session.state = .permission }
         } else if isPermission {
-            if source == "codex-official" { session.awaitingOfficialApproval = true }
+            if source == "codex-official" {
+                session.pendingOfficialApprovalKeys.insert(approvalKey)
+                session.awaitingOfficialApproval = true
+            }
             cancelCodexIdleLocked(sessionID)
             if let turnID { session.currentTurnID = turnID }
             session.terminalTurnID = nil
@@ -365,7 +380,8 @@ final class StatusServer {
             session.state = .permission
         } else if isWork {
             if source == "codex-official", event == "PostToolUse" {
-                session.awaitingOfficialApproval = false
+                session.pendingOfficialApprovalKeys.remove(approvalKey)
+                session.awaitingOfficialApproval = !session.pendingOfficialApprovalKeys.isEmpty
             }
             cancelCodexIdleLocked(sessionID)
             if session.currentTurnID == nil { session.currentTurnID = turnID }
@@ -374,7 +390,10 @@ final class StatusServer {
             session.generation += 1
             session.state = session.awaitingOfficialApproval ? .permission : .executing
         } else if isTerminal {
-            if event != "Stop" { session.awaitingOfficialApproval = false }
+            if event != "Stop" {
+                session.awaitingOfficialApproval = false
+                session.pendingOfficialApprovalKeys.removeAll()
+            }
             let terminalTurnID = turnID ?? session.currentTurnID
             session.terminalTurnID = terminalTurnID
             session.generation += 1
@@ -393,12 +412,14 @@ final class StatusServer {
                     session.state = .idle
                 } else {
                     if session.state != .permission { session.state = .executing }
-                    scheduleCodexIdleLocked(
-                        sessionID,
-                        generation: session.generation,
-                        delay: session.state == .permission
-                            ? codexPermissionGracePeriod : codexStopGracePeriod
-                    )
+                    if session.state == .permission {
+                        // A provisional Stop is not an approval response.
+                        // Never time out a still-pending human decision.
+                        cancelCodexIdleLocked(sessionID)
+                    } else {
+                        scheduleCodexIdleLocked(sessionID, generation: session.generation,
+                                                delay: codexStopGracePeriod)
+                    }
                 }
             } else {
                 cancelCodexIdleLocked(sessionID)
@@ -460,6 +481,7 @@ final class StatusServer {
             if let active = activeBySession.removeValue(forKey: sessionID) {
                 if session.currentTurnID != active.turnID {
                     session.awaitingOfficialApproval = false
+                    session.pendingOfficialApprovalKeys.removeAll()
                 }
                 session.currentTurnID = active.turnID
                 session.terminalTurnID = nil
@@ -467,6 +489,7 @@ final class StatusServer {
                 session.state = session.awaitingOfficialApproval ? .permission : active.state
             } else {
                 session.awaitingOfficialApproval = false
+                session.pendingOfficialApprovalKeys.removeAll()
                 if let turnID = session.currentTurnID { session.terminalTurnID = turnID }
                 session.currentTurnID = nil
                 session.jsonlActiveTurnID = nil
