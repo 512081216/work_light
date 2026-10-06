@@ -1,307 +1,202 @@
-<div align="center">
+# Work Light · AI 工作状态灯
 
-<img src="docs/icon.png" width="140" alt="Lights icon">
+一个 macOS 菜单栏应用，用灯光显示 AI 编程助手的执行、等待审批和空闲状态。应用名称仍为 **Lights**。
 
-# Lights
+本仓库基于 [fengyiqicoder/Lights](https://github.com/fengyiqicoder/Lights) 开发，重点增强 Codex 桌面版的会话监控、多对话显示与刘海贴合效果，保留原项目 MIT 许可证和署名。
 
-**A floating traffic light for your AI coding assistant.**
-**给 AI 编程助手的浮动交通灯。**
+## 灯光状态
 
-<img src="docs/demo.gif" width="100" alt="Lights demo">
+| 灯光 | 状态 | 效果 |
+|---|---|---|
+| 🔴 红灯 | 正在执行任务 | 呼吸灯 |
+| 🟡 黄灯 | 检测到审批或输入等待 | 持续闪烁，直到对应等待解除 |
+| 🟢 绿灯 | 空闲或任务完成 | 从红灯切换时闪烁约 3 秒，再常亮 |
 
-[English](#english) · [中文](#中文)
+单灯显示所有已跟踪 Codex 对话的汇总状态，优先级为：等待审批 > 正在执行 > 空闲。多灯模式分别显示每个对话的状态。
 
-### ⬇️ [Upstream Lights v0.1.0 for macOS](https://github.com/fengyiqicoder/Lights/releases/latest/download/Lights-v0.1.0.zip)
+## 显示模式与设置
 
-*Upstream release: macOS 14+ · Developer-ID signed · Notarized by Apple · ~1.5 MB*
+右键状态灯，选择 **Settings & Hooks…**；也可从菜单栏图标进入设置。
 
-</div>
+| 设置 | 说明 |
+|---|---|
+| `Floating corner` | 可移动的单灯浮窗，初始位于屏幕右上角；支持 Small / Medium / Large 尺寸 |
+| `Left of notch` | 单灯贴合刘海左侧，黑色外壳与刘海衔接，右下角不设圆角 |
+| `Conversation lights` | 每个活跃本地 Codex 对话一盏灯，按侧栏顺序从左到右排列；悬停显示标题和状态 |
+| 灯的亮度 | 20%–100%，默认 100%；所有模式立即生效，自动保存 |
+| 空闲多久后移除灯 | 1–1440 分钟，默认 30 分钟；修改后立即生效，自动保存 |
 
-> This repository contains a customized version based on [fengyiqicoder/Lights](https://github.com/fengyiqicoder/Lights), under the original MIT license. The upstream download does not include these changes. Local builds use ad-hoc signing and are not Apple-notarized.
->
-> 本仓库为 Lights 增强版，保留原项目 MIT 许可证及历史。上游下载不包含本仓库新增功能；请从源码构建，当前本地构建采用临时签名，未经 Apple 公证。
+**每次启动默认进入多灯模式**，即使上次退出前使用其他模式。启动后仍可手动切换。
 
-## 本仓库新增功能
+多灯模式的“活跃”包括正在执行、等待审批，以及完成任务后尚未达到空闲期限的对话：
 
-- 单灯状态切换、刘海左侧贴合显示、多对话独立灯；每次启动默认多灯模式。
-- Codex 会话/任务标识追踪，官方 hooks 与桌面 JSONL 监视器协同，等待审批显示黄灯。
-- 红灯呼吸、黄灯闪烁、完成后绿灯闪烁再常亮。
-- 设置空闲保留时间（1–1440 分钟，默认 30）及灯亮度（20%–100%，默认 100%），即时生效并保存。
+- 任务完成不会立即隐藏灯：绿灯提示后继续常亮。
+- 空闲达到设置的时间、期间没有新任务，才移除对话的灯；不需要等归档。
+- 新任务复用同一对话的灯，并在任务完成后重新计算空闲时间。
+- 执行或等待审批期间不会因空闲期限到达而移除。
+- 没有活跃对话时显示一盏待机灯；重启 Lights 后重新收集对话，亮度和保留时间设置不变。
 
-### 构建与桌面监视器
+桌面监视器参考置顶、项目、聊天排序设置，并排除子代理对话。刘海模式使用固定紧凑尺寸；没有刘海时回退到屏幕顶部中间偏左的位置。
 
-需要 macOS、匹配的 Xcode/Command Line Tools；当前构建脚本面向 Apple Silicon。
+## 系统要求
+
+- macOS 14 或更高版本。
+- Swift 5.9 或更高版本，以及与当前 macOS SDK 匹配的 Xcode 或 Command Line Tools。
+- 当前构建脚本指定 `arm64`，面向 Apple Silicon；Intel Mac 未经本项目验证。
+- Node.js：用于 Codex hook、桌面监视器和测试。测试脚本使用内置 `fetch`，需要 Node.js 18 或更高版本。
+- 桌面监视器调用 `/usr/bin/sqlite3` 和 `/usr/bin/curl`。
+
+## 从源码安装
 
 ```bash
+git clone https://github.com/512081216/work_light.git
+cd work_light
 ./build-app.sh
 open Lights.app
 ```
 
-在设置中安装 Codex hooks。若桌面版未发送完整 hooks，可在 Lights 运行时另开终端启动监视器（需要 Node.js；macOS 自带 sqlite3 和 curl）：
+构建脚本会编译发布版、生成应用图标、打包 Codex hook，并对 `Lights.app` 进行本地 ad-hoc 签名。可将生成的应用拖入“应用程序”目录，再从那里启动。
+
+**本增强版没有声明 Developer ID 签名或 Apple 公证。** 上游下载包不包含这里的新增功能，其签名和公证信息也不代表本仓库。
+
+### 配置 Codex hooks
+
+首次启动会打开设置。找到 **Codex CLI**，点击 **Install**。安装逻辑会：
+
+1. 将 `Resources/lights-codex-hook.js` 安装到 `~/.codex/lights-codex-hook.js`。
+2. 合并 `~/.codex/hooks.json` 中的 Lights 生命周期 hooks，替换旧的全局通知。
+3. 在 `~/.codex/config.toml` 中尝试启用 `features.hooks = true`。
+
+hook 传递会话、任务和可用的工具调用标识，避免不同对话、旧任务与并行工具相互覆盖状态。JSON hook 配置写入前生成带时间戳的备份，并保留其他 hooks。
+
+实际事件是否发出取决于 Codex 版本。**Hooks configured ✓** 只表示检测到配置，不代表所有桌面审批类型都已实测。更新应用内的 hook 脚本后，可重新安装以更新稳定路径下的运行脚本。
+
+### 启动 Codex 桌面监视器
+
+桌面版可能没有完整发出 hooks。建议使用桌面版时同时运行监视器：
 
 ```bash
 node lights-codex-desktop-watcher.js
 ```
 
-监视器只读取本机 Codex 数据，向 `127.0.0.1:9876` 发送状态。默认读取 `~/.codex`，也支持 `LIGHTS_CODEX_HOME` 指定数据目录；不会自动安装本机 LaunchAgent。
+保持终端运行；按 `Ctrl+C` 停止。监视器约每秒读取本机会话数据库和增量 JSONL 日志，向已运行的 Lights 发送会话状态及快照。
 
-### 回归验证
+数据目录优先级为 `LIGHTS_CODEX_HOME` > `CODEX_HOME` > `~/.codex`：
 
 ```bash
+LIGHTS_CODEX_HOME="/path/to/codex-data" node lights-codex-desktop-watcher.js
+```
+
+当前实现使用 `state_5.sqlite`、`.codex-global-state.json` 获取会话、标题和侧栏顺序，最多扫描最近更新的 256 个未归档、非子代理对话。
+
+仓库不会自动安装开机启动服务。如需常驻运行，可自行配置 LaunchAgent，使用 Node 和脚本的**绝对路径**。更新监视器源码后必须重启进程，旧进程不会自动加载新文件。
+
+### 其他编程助手
+
+| 工具 | 当前实现 |
+|---|---|
+| Codex | 会话级 hooks + 本机桌面 JSONL 监视器；多对话灯主要针对 Codex |
+| Claude Code | 可配置 `~/.claude/settings.json` 的全局状态 hooks；不会生成逐对话灯 |
+| Goose / OpenCode | 占位实现，尚未接入状态监控 |
+
+## 监控逻辑与限制
+
+Lights 根据事件判断状态，不用“文件最近被修改”推断任务仍在执行。任务完成、中止记录用于结束红灯；会话快照用于校正遗漏或过期状态。
+
+审批跟踪包括显式权限申请、用户输入工具及可识别的提权调用。执行单元返回 `Script running with cell ID …` 时，监视器继续跟踪后续 `wait`，不会把临时返回当作审批结束。官方 hook 提供调用标识时，只由匹配结果解除对应审批，不由无关并行输出清除。
+
+已知限制：
+
+- **不能承诺识别所有审批弹窗。** 若 Codex 或插件没有对应 hook，且 JSONL 也没有可识别的等待信息，Lights 无法仅凭弹窗存在判断状态。
+- 一个执行单元可能先审批、再做其他工作。JSONL 只记录整个调用返回时，黄灯可能保持到执行单元真正结束。
+- 侧栏排序依赖 Codex 本地存储格式；自定义分组、未识别的排序设置或超出扫描上限的对话可能无法完整还原。
+- 空闲期限在状态刷新时判定。监视器正常轮询会持续刷新；仅用 hooks、长时间没有新事件时，灯的移除可能延后。
+- 重启 Lights 不恢复此前所有已完成对话的内存状态；监视器重新发现的活跃任务会再次显示。
+- 菜单栏空间不足时图标可能被刘海遮住，可右键状态灯打开设置。菜单栏图标不是实时彩色状态灯。
+- 无刘海屏幕、多显示器、全屏空间和 Intel Mac 的行为不保证与已验证本机效果完全一致。
+
+## 本机 HTTP 接口
+
+服务只绑定 `127.0.0.1:9876`，不要转发到公网。全局手动状态可能被自动事件覆盖；多灯优先显示会话状态，不应使用全局接口测试某个对话。
+
+| 路径 | 用途 |
+|---|---|
+| `/status` | 查询汇总状态：`executing` / `permission` / `idle` / `off` |
+| `/sessions` | 返回当前可显示对话的 `id`、`title`、`state`，按灯的顺序排列 |
+| `/executing`、`/permission`、`/idle`、`/off` | 全局状态控制，主要用于单灯调试 |
+| `/codex-event` | 接收 hook 的会话/任务事件，使用 JSON 请求体 |
+| `/codex-snapshot` | 接收桌面监视器的活动任务快照，使用 JSON 请求体 |
+| `/snapshot` | 将 Lights 自身窗口保存为本机 `/tmp` 下的 PNG，返回路径 |
+
+```bash
+curl -s http://127.0.0.1:9876/status
+curl -s http://127.0.0.1:9876/sessions
+```
+
+## 开发与测试
+
+```bash
+# 编译应用
 swift build --disable-sandbox -c release --arch arm64
+
+# 检查 JavaScript 并验证审批跟踪
+node --check Resources/lights-codex-hook.js
 node --check lights-codex-desktop-watcher.js
-swiftc -module-cache-path .build/test-module-cache Sources/Lights/LightPreferences.swift Sources/Lights/StatusServer.swift tests/retention-server/main.swift -o .build/retention-test-server
+node tests/approval-watcher.js
+
+# 编译隔离的状态服务测试入口
+swiftc -module-cache-path .build/test-module-cache \
+  Sources/Lights/LightPreferences.swift \
+  Sources/Lights/StatusServer.swift \
+  tests/retention-server/main.swift \
+  -o .build/retention-test-server
+
+# 验证会话保留、超时、审批关联与快照合并
 node tests/conversation-retention.js .build/retention-test-server
 ```
 
-测试使用独立的本机 19876 端口及加速的 6 秒超时，不影响正常 Lights 会话。
+隔离测试使用 `127.0.0.1:19876` 和加速的 6 秒空闲期限，不写入正常 Lights 会话。确保该端口空闲，不要并行运行两份测试。测试通过不代表所有 Codex 版本、插件审批和设备均已实测。
 
----
+## 常见问题
 
-## English
+**Swift SDK 或工具链不匹配**
 
-Lights is a tiny macOS menu-bar app that shows a floating traffic light reflecting what your AI coding assistant is doing right now:
+检查 `xcode-select -p`、`xcrun --show-sdk-path`、`swift --version`，确认开发工具、SDK 和 macOS 相容。完整 Xcode 需完成首次启动及许可确认；Command Line Tools 也需匹配 SDK。不要混用不同安装目录的编译器和 SDK。
 
-| Light | Meaning |
-|---|---|
-| 🔴 Red | The assistant is executing — model is generating, tools running |
-| 🟡 Yellow | The assistant needs your input — permission prompt, AskUserQuestion, ExitPlanMode |
-| 🟢 Green | Idle / response complete |
+**任务开始后灯没有变化**
 
-It listens on `http://127.0.0.1:9876` and your AI tool fires `curl` from lifecycle hooks. Glanceable. No context switch.
+查询 `/status`、`/sessions` 确认服务正常，再检查 hooks 是否实际发出、监视器是否运行、数据目录是否正确。首次监控需要读取日志，可能稍后才显示全部当前任务。
 
-### Supported tools
+**审批时没有黄灯，或审批结束仍是黄灯**
 
-| Tool | Status | How |
-|---|---|---|
-| Claude Code | ✅ Full event hooks | `~/.claude/settings.json` |
-| Codex CLI | ✅ Full event hooks | `~/.codex/hooks.json` + `features.hooks = true` in `config.toml` |
-| Goose | ⏳ Placeholder — researching | — |
-| OpenCode | ❌ No event hooks | — |
+确认后台已重启到新代码，记录当时的工具名称、审批类型和 `/sessions` 结果。显式权限申请、插件授权、异步输入不是相同事件，排查时需区分；不要用全局 `/permission` 替代真实事件链验证。
 
-### Install
+**完成后绿灯一直保留**
 
-Requires macOS 14+ and Swift 5.9+ (Xcode Command Line Tools is enough).
+默认保留 30 分钟，可修改「空闲多久后移除灯」。监视器持续轮询才能及时刷新超时结果。
 
-```bash
-git clone https://github.com/fengyiqicoder/Lights.git
-cd Lights
-./build-app.sh
-open Lights.app
-```
+## 源码结构
 
-On first launch a Setup panel pops up. For each supported tool detected on your system, click **[Install]** — Lights writes the hooks directly to that tool's config (backing up first).
-
-You can also use the [skills.sh](https://skills.sh) distribution if you prefer Claude itself walk you through:
-
-```bash
-npx skillsadd fengyiqicoder/lights-hooks
-```
-
-Then in Claude Code: *"set up lights hooks"*.
-
-### Usage
-
-| Action | How |
-|---|---|
-| Show / hide the floating window | Menu-bar icon → *Show / Hide Window* |
-| Open Settings | Menu-bar icon → *Settings & Hooks…* — or right-click the light |
-| Change display mode | Settings → *Display mode* → *Floating corner* / *Left of notch* / *Conversation lights* |
-| Change size | Right-click the floating window → *Size ▸* (Small / Medium / Large) |
-| Manual override | Click any single light to lock it on, or use the HTTP endpoints below |
-| Move the window | Drag the dark housing background |
-| Quit | Menu-bar icon → *Quit Lights* |
-
-### HTTP control
-
-```bash
-curl localhost:9876/executing   # → red
-curl localhost:9876/permission  # → yellow
-curl localhost:9876/idle        # → green
-curl localhost:9876/off         # → all off
-curl localhost:9876/status      # → query current state
-curl localhost:9876/snapshot    # → write a PNG of the current window to /tmp, returns path
-```
-
-### How it works
-
-```
-  Claude Code / Codex CLI
-        │ (lifecycle event)
-        ▼
-  hook command:  curl http://127.0.0.1:9876/<state>
-        │
-        ▼
-  Lights HTTP server  ──▶  SwiftUI state  ──▶  floating light updates
-```
-
-The Settings panel also switches between the movable floating light and a compact 32 pt notch light attached to the notch's left edge. It reads each tool's config, detects whether Lights hooks are present, and writes/removes them via an idempotent JSON merge engine that preserves all your other hooks. A timestamped backup is saved beside the config file before every write.
-
-### Known limitations
-
-- On MacBook Pro with notch + many menu-bar items already, the new status-item icon may be pushed behind the notch and become invisible. Right-clicking the floating window provides the same menu — functionality is not lost.
-- Live status-color mirroring in the menu-bar icon is not yet implemented (it stays as a neutral 3-dot template).
-
-### Project layout
-
-```
+```text
 Sources/Lights/
-  main.swift                       app delegate, content view, lights window
-  StatusServer.swift               HTTP listener on 9876
-  MenuBarController.swift          NSStatusItem + menu
-  ToolIntegration.swift            protocol + types
-  JSONHookMerger.swift             shared idempotent JSON merge engine
-  ClaudeCodeIntegration.swift      ~/.claude/settings.json driver
-  CodexIntegration.swift           ~/.codex/ driver (hooks.json + config.toml)
-  PlaceholderIntegrations.swift    Goose, OpenCode stubs
-  SetupView.swift                  SwiftUI panel
-  SetupManager.swift               observable state + first-launch flag
-tools/render-icon.swift            Core Graphics icon generator
-skill/SKILL.md                     skills.sh distributable skill
-docs/superpowers/specs/            design notes
-build-app.sh                       build → .app bundle
+  main.swift                    应用启动、显示模式、灯光与动画
+  StatusServer.swift            HTTP 服务、会话状态、审批合并和空闲保留
+  LightPreferences.swift        亮度和保留时间的默认值及范围
+  SetupView.swift               设置界面
+  SetupManager.swift            工具配置状态管理
+  MenuBarController.swift       菜单栏入口
+  CodexIntegration.swift        Codex hook 安装与移除
+  ClaudeCodeIntegration.swift   Claude Code hook 配置
+  JSONHookMerger.swift          JSON hook 合并、备份及命令构造
+Resources/lights-codex-hook.js   官方 hook 的 stdin 接收与状态转发
+lights-codex-desktop-watcher.js  本机 JSONL 监视器与侧栏排序
+tests/                         审批跟踪和状态服务回归测试
+build-app.sh                   应用打包及本地签名
+tools/                         图标和上游演示辅助脚本
 ```
 
-### Development
+构建产物、缓存和本机日志不属于源码发布内容。监视器只向本机回环接口发送状态；编程助手自身的网络行为不由 Lights 管理。
 
-```bash
-swift build                                     # CLI only
-./build-app.sh                                  # .app bundle (re-renders icon)
-swift tools/render-icon.swift                   # only regenerate PNGs
-iconutil -c icns AppIcon.iconset -o Resources/AppIcon.icns
-```
+## 许可证
 
-### License
-
-MIT. See [LICENSE](LICENSE).
-
----
-
-## 中文
-
-Lights 是一个 macOS 菜单栏小工具：可在屏幕角落悬浮，或贴合显示在 MacBook 刘海左侧，实时显示 AI 编程助手的状态。
-
-| 灯色 | 含义 |
-|---|---|
-| 🔴 红 | AI 正在执行 —— 模型在生成、工具在运行 |
-| 🟡 黄 | AI 等你回应 —— 权限弹窗、AskUserQuestion、ExitPlanMode |
-| 🟢 绿 | 空闲 / 回复完成 |
-
-工作机制：Lights 在 `http://127.0.0.1:9876` 监听，AI 工具的 lifecycle hook 用 `curl` 通知它。一眼看完，不需要切窗口。
-
-### 支持的工具
-
-| 工具 | 状态 | 配置位置 |
-|---|---|---|
-| Claude Code | ✅ 完整事件 hook | `~/.claude/settings.json` |
-| Codex CLI | ✅ 完整事件 hook | `~/.codex/hooks.json` + `config.toml` 加 `features.hooks = true` |
-| Goose | ⏳ 占位中 —— 文档调研中 | — |
-| OpenCode | ❌ 没有事件 hook | — |
-
-### 安装
-
-需要 macOS 14+ 和 Swift 5.9+（装了 Xcode Command Line Tools 就够）。
-
-```bash
-git clone https://github.com/fengyiqicoder/Lights.git
-cd Lights
-./build-app.sh
-open Lights.app
-```
-
-第一次启动会自动弹 Setup 面板，列出系统上检测到的所有工具。点对应工具的 **[Install]** —— Lights 会直接改对应配置文件（写之前自动备份）。
-
-不想用 GUI 的人可以走 [skills.sh](https://skills.sh) 渠道：
-
-```bash
-npx skillsadd fengyiqicoder/lights-hooks
-```
-
-然后在 Claude Code 里说"装一下 lights hooks"。
-
-### 用法
-
-| 操作 | 怎么做 |
-|---|---|
-| 显示 / 隐藏浮窗 | 菜单栏图标 → *Show / Hide Window* |
-| 打开设置 | 菜单栏图标 → *Settings & Hooks…*，或右键状态灯 |
-| 切换显示模式 | 设置 → *Display mode* → *Floating corner* / *Left of notch* / *Conversation lights* |
-| 设置活跃保留时间 | 设置 →「空闲多久后移除灯」→ 输入 1–1440 分钟，默认 30，自动保存并立即生效 |
-| 调整灯亮度 | 设置 →「灯的亮度」滑块 → 20%–100%，默认 100%，所有模式立即生效并自动保存 |
-| 切换尺寸 | 右键浮窗 → *Size ▸*（Small / Medium / Large） |
-| 手动控制 | 点任意一盏灯锁定颜色，或用下面的 HTTP 接口 |
-| 移动位置 | 拖住灯窗口深色背景 |
-| 退出 | 菜单栏图标 → *Quit Lights* |
-
-### HTTP 控制
-
-Lights 每次启动默认进入 *Conversation lights* 多灯模式，启动后仍可切换其他模式。此模式在刘海左侧为每个活跃本地 Codex 对话显示一盏灯，按侧栏的置顶、项目及聊天顺序从左到右排列。「活跃对话」指正在执行、等待审批，或任务完成后空闲未满设定时间的对话。悬停可查看对话标题；等待审批为黄色闪烁，工作为红色呼吸，完成后绿色闪烁提示再常亮。空闲连续达到设置的分钟数且没有新任务才移除，不需要等归档；新任务复用同一盏灯并重新计时，执行与等待审批期间不会超时移除。重启 Lights 后重新收集参与任务的对话，保留时间设置不变。没有活跃对话时显示一盏绿色待机灯。
-
-```bash
-curl localhost:9876/executing   # → 红
-curl localhost:9876/permission  # → 黄
-curl localhost:9876/idle        # → 绿
-curl localhost:9876/off         # → 全灭
-curl localhost:9876/status      # → 查询当前状态
-curl localhost:9876/snapshot    # → 把当前窗口画面存成 PNG 到 /tmp，返回路径
-```
-
-### 工作原理
-
-```
-  Claude Code / Codex CLI
-        │ (lifecycle 事件)
-        ▼
-  hook 命令:  curl http://127.0.0.1:9876/<state>
-        │
-        ▼
-  Lights HTTP server  ──▶  SwiftUI 状态  ──▶  浮窗变色
-```
-
-Setup 面板会读每个工具的配置，判断 Lights 的 hook 是否已经装好，通过一个幂等的 JSON merge 引擎写入或移除 —— 保留你已有的其它所有 hook。每次写入前会在配置文件旁边留一份带时间戳的备份。
-
-### 已知限制
-
-- 带刘海的 MacBook Pro + 菜单栏已经塞了很多图标时，新加的 status item 可能被挤到刘海后面看不见。右键浮窗有等价的菜单 —— 功能不丢，只是图标隐藏。
-- 菜单栏图标目前是中性的三点 template，还没做实时状态色镜像。
-
-### 项目结构
-
-```
-Sources/Lights/
-  main.swift                       AppDelegate / ContentView / 浮动窗口
-  StatusServer.swift               9876 端口 HTTP 监听
-  MenuBarController.swift          NSStatusItem + 菜单
-  ToolIntegration.swift            协议 + 类型
-  JSONHookMerger.swift             共享的幂等 JSON merge 引擎
-  ClaudeCodeIntegration.swift      操作 ~/.claude/settings.json
-  CodexIntegration.swift           操作 ~/.codex/（hooks.json + config.toml）
-  PlaceholderIntegrations.swift    Goose、OpenCode 占位
-  SetupView.swift                  SwiftUI 设置面板
-  SetupManager.swift               可观察状态 + 首次启动标记
-tools/render-icon.swift            Core Graphics 图标生成
-skill/SKILL.md                     给 skills.sh 用的 skill 包
-docs/superpowers/specs/            设计文档
-build-app.sh                       构建 .app
-```
-
-### 开发
-
-```bash
-swift build                                     # 只编译命令行二进制
-./build-app.sh                                  # 打包 .app（顺便重新渲染图标）
-swift tools/render-icon.swift                   # 单独重新生成图标 PNG
-iconutil -c icns AppIcon.iconset -o Resources/AppIcon.icns
-```
-
-### 许可
-
-MIT，见 [LICENSE](LICENSE)。
-
----
-
-<div align="center">
-
-🤖 Built with [Claude Code](https://claude.com/claude-code)
-
-</div>
+[MIT License](LICENSE)。保留上游版权声明及许可条款；`docs` 中旧演示素材不表示增强版的最新界面。
