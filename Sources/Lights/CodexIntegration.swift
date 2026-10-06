@@ -44,13 +44,21 @@ final class CodexIntegration: ToolIntegration {
         if !fm.fileExists(atPath: dir) {
             try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
-        // 1. hooks.json — merge in our specs
+        // 1. Install the stable stdin-aware hook next to Codex's config.
+        // The app may be moved or rebuilt; hooks.json must not point into an
+        // ephemeral build directory.
+        try installHookRuntime()
+
+        // 2. hooks.json — remove legacy global curls, then merge the
+        // session/turn-aware hook.
         _ = try JSONHookMerger.backup(hooksPath)
         var dict = try JSONHookMerger.readJSON(hooksPath)
+        JSONHookMerger.removeMatching(&dict,
+            fragments: JSONHookMerger.lightsCommandFragments)
         JSONHookMerger.merge(into: &dict, specs: JSONHookMerger.codexHookSpecs)
         try JSONHookMerger.writeJSON(dict, to: hooksPath)
 
-        // 2. config.toml — ensure `features.hooks = true`
+        // 3. config.toml — ensure `features.hooks = true`
         try ensureFeaturesHooksEnabled()
     }
 
@@ -87,5 +95,22 @@ final class CodexIntegration: ToolIntegration {
         if !newContent.isEmpty && !newContent.hasSuffix("\n") { newContent += "\n" }
         newContent += "\n# Lights: enable lifecycle hooks subsystem\nfeatures.hooks = true\n"
         try newContent.write(toFile: configPath, atomically: true, encoding: .utf8)
+    }
+
+    private func installHookRuntime() throws {
+        guard let source = Bundle.main.url(
+            forResource: "lights-codex-hook", withExtension: "js"
+        ) else {
+            throw ToolIntegrationError.writeFailed("Bundled Codex hook is missing")
+        }
+        let data = try Data(contentsOf: source)
+        try data.write(
+            to: URL(fileURLWithPath: JSONHookMerger.codexHookPath),
+            options: .atomic
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: JSONHookMerger.codexHookPath
+        )
     }
 }

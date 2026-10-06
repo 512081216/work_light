@@ -15,7 +15,7 @@ if [ ! -f Resources/AppIcon.icns ]; then
 fi
 
 echo "→ Compiling release binary..."
-swift build -c release --arch arm64
+swift build --disable-sandbox -c release --arch arm64
 
 echo "→ Assembling $APP_DIR..."
 rm -rf "$APP_DIR"
@@ -23,6 +23,7 @@ mkdir -p "$EXEC_DIR" "$RES_DIR"
 cp .build/release/$APP_NAME "$EXEC_DIR/$APP_NAME"
 cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
 cp Resources/AppIcon.icns "$RES_DIR/AppIcon.icns"
+cp Resources/lights-codex-hook.js "$RES_DIR/lights-codex-hook.js"
 
 echo "→ Code-signing (ad-hoc)..."
 codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true

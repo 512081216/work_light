@@ -35,8 +35,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(item("Show / Hide Window", #selector(actionToggleWindow)))
         menu.addItem(.separator())
-        menu.addItem(item("Setup Hooks…", #selector(actionShowSetup)))
+        menu.addItem(item("Settings & Hooks…", #selector(actionShowSetup)))
         menu.addItem(.separator())
+
+        let displayItem = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let displayMenu = NSMenu()
+        let currentMode = LightsDisplayMode(rawValue:
+            UserDefaults.standard.string(forKey: "lightsDisplayMode") ?? "") ?? .floating
+        for mode in LightsDisplayMode.allCases {
+            let m = NSMenuItem(title: mode.label,
+                               action: #selector(actionSetDisplayMode(_:)),
+                               keyEquivalent: "")
+            m.target = self
+            m.representedObject = mode.rawValue
+            m.state = (mode == currentMode) ? .on : .off
+            displayMenu.addItem(m)
+        }
+        displayItem.submenu = displayMenu
+        menu.addItem(displayItem)
 
         let sizeItem = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
         let sizeMenu = NSMenu()
@@ -81,6 +97,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         NotificationCenter.default.post(
             name: .lightsSetSize, object: nil, userInfo: ["raw": raw]
         )
+    }
+
+    @objc private func actionSetDisplayMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              LightsDisplayMode(rawValue: raw) != nil else { return }
+        UserDefaults.standard.set(raw, forKey: "lightsDisplayMode")
+        NotificationCenter.default.post(name: .lightsLayoutChanged, object: nil)
     }
 
     @objc private func actionOff() {

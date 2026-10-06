@@ -24,17 +24,43 @@ enum JSONHookMerger {
                  command: lightsCurl("executing"),  timeout: 2000),
     ]
 
-    /// Codex uses `PermissionRequest` instead of `Notification`.
-    static let codexHookSpecs: [HookSpec] = lightsHookSpecs.map { spec in
-        spec.event == "Notification"
-            ? HookSpec(event: "PermissionRequest", matcher: spec.matcher,
-                       command: spec.command, timeout: spec.timeout)
-            : spec
-    }
+    /// Codex's official hook payload contains the session and turn identity.
+    /// Keep that identity all the way to StatusServer; a bare `/idle` request
+    /// cannot distinguish a stale Stop from the currently running turn.
+    static let codexHookSpecs: [HookSpec] = [
+        HookSpec(event: "SessionStart", matcher: nil,
+                 command: codexHookCommand, timeout: 30000),
+        HookSpec(event: "UserPromptSubmit", matcher: nil,
+                 command: codexHookCommand, timeout: 30000),
+        HookSpec(event: "PreToolUse", matcher: "*",
+                 command: codexHookCommand, timeout: 30000),
+        HookSpec(event: "PostToolUse", matcher: "*",
+                 command: codexHookCommand, timeout: 30000),
+        HookSpec(event: "PermissionRequest", matcher: nil,
+                 command: codexHookCommand, timeout: 30000),
+        HookSpec(event: "Stop", matcher: nil,
+                 command: codexHookCommand, timeout: 30000),
+    ]
 
     static let lightsCommandFragments = [
-        "9876/executing", "9876/permission", "9876/idle", "9876/off"
+        "9876/executing", "9876/permission", "9876/idle", "9876/off",
+        "lights-codex-hook.js"
     ]
+
+    static var codexHookCommand: String {
+        let node = ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+            ?? "/usr/bin/env node"
+        return "\(shellQuote(node)) \(shellQuote(codexHookPath))"
+    }
+
+    static var codexHookPath: String {
+        "\(NSHomeDirectory())/.codex/lights-codex-hook.js"
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
+    }
 
     private static func lightsCurl(_ endpoint: String) -> String {
         "curl -s --max-time 1 http://127.0.0.1:9876/\(endpoint) >/dev/null 2>&1 || true"

@@ -11,15 +11,50 @@
 
 [English](#english) · [中文](#中文)
 
-### ⬇️ [Download Lights v0.1.0 for macOS](https://github.com/fengyiqicoder/Lights/releases/latest/download/Lights-v0.1.0.zip)
+### ⬇️ [Upstream Lights v0.1.0 for macOS](https://github.com/fengyiqicoder/Lights/releases/latest/download/Lights-v0.1.0.zip)
 
-*macOS 14+ · Developer-ID signed · Notarized by Apple · ~1.5 MB*
+*Upstream release: macOS 14+ · Developer-ID signed · Notarized by Apple · ~1.5 MB*
 
 </div>
 
-> **First launch:** Signed with Developer ID and notarized by Apple, so macOS will just show the standard *"This app was downloaded from the Internet, are you sure you want to open it?"* dialog. Click **Open**. No Privacy & Security workaround needed.
+> This repository contains a customized version based on [fengyiqicoder/Lights](https://github.com/fengyiqicoder/Lights), under the original MIT license. The upstream download does not include these changes. Local builds use ad-hoc signing and are not Apple-notarized.
 >
-> 第一次打开：已经过 Apple 公证（notarized），系统只会弹标准的"此 App 是从互联网下载的，确定要打开吗？"。点 **打开** 即可，不需要去隐私与安全性里折腾。
+> 本仓库为 Lights 增强版，保留原项目 MIT 许可证及历史。上游下载不包含本仓库新增功能；请从源码构建，当前本地构建采用临时签名，未经 Apple 公证。
+
+## 本仓库新增功能
+
+- 单灯状态切换、刘海左侧贴合显示、多对话独立灯；每次启动默认多灯模式。
+- Codex 会话/任务标识追踪，官方 hooks 与桌面 JSONL 监视器协同，等待审批显示黄灯。
+- 红灯呼吸、黄灯闪烁、完成后绿灯闪烁再常亮。
+- 设置空闲保留时间（1–1440 分钟，默认 30）及灯亮度（20%–100%，默认 100%），即时生效并保存。
+
+### 构建与桌面监视器
+
+需要 macOS、匹配的 Xcode/Command Line Tools；当前构建脚本面向 Apple Silicon。
+
+```bash
+./build-app.sh
+open Lights.app
+```
+
+在设置中安装 Codex hooks。若桌面版未发送完整 hooks，可在 Lights 运行时另开终端启动监视器（需要 Node.js；macOS 自带 sqlite3 和 curl）：
+
+```bash
+node lights-codex-desktop-watcher.js
+```
+
+监视器只读取本机 Codex 数据，向 `127.0.0.1:9876` 发送状态。默认读取 `~/.codex`，也支持 `LIGHTS_CODEX_HOME` 指定数据目录；不会自动安装本机 LaunchAgent。
+
+### 回归验证
+
+```bash
+swift build --disable-sandbox -c release --arch arm64
+node --check lights-codex-desktop-watcher.js
+swiftc -module-cache-path .build/test-module-cache Sources/Lights/LightPreferences.swift Sources/Lights/StatusServer.swift tests/retention-server/main.swift -o .build/retention-test-server
+node tests/conversation-retention.js .build/retention-test-server
+```
+
+测试使用独立的本机 19876 端口及加速的 6 秒超时，不影响正常 Lights 会话。
 
 ---
 
@@ -70,7 +105,8 @@ Then in Claude Code: *"set up lights hooks"*.
 | Action | How |
 |---|---|
 | Show / hide the floating window | Menu-bar icon → *Show / Hide Window* |
-| Open Setup | Menu-bar icon → *Setup Hooks…* — or right-click the floating window |
+| Open Settings | Menu-bar icon → *Settings & Hooks…* — or right-click the light |
+| Change display mode | Settings → *Display mode* → *Floating corner* / *Left of notch* / *Conversation lights* |
 | Change size | Right-click the floating window → *Size ▸* (Small / Medium / Large) |
 | Manual override | Click any single light to lock it on, or use the HTTP endpoints below |
 | Move the window | Drag the dark housing background |
@@ -99,7 +135,7 @@ curl localhost:9876/snapshot    # → write a PNG of the current window to /tmp,
   Lights HTTP server  ──▶  SwiftUI state  ──▶  floating light updates
 ```
 
-The Setup panel reads each tool's config, detects whether Lights hooks are present, and writes/removes them via an idempotent JSON merge engine that preserves all your other hooks. A timestamped backup is saved beside the config file before every write.
+The Settings panel also switches between the movable floating light and a compact 32 pt notch light attached to the notch's left edge. It reads each tool's config, detects whether Lights hooks are present, and writes/removes them via an idempotent JSON merge engine that preserves all your other hooks. A timestamped backup is saved beside the config file before every write.
 
 ### Known limitations
 
@@ -143,7 +179,7 @@ MIT. See [LICENSE](LICENSE).
 
 ## 中文
 
-Lights 是一个 macOS 菜单栏小工具：屏幕角落悬浮一盏交通灯，实时显示 AI 编程助手的状态。
+Lights 是一个 macOS 菜单栏小工具：可在屏幕角落悬浮，或贴合显示在 MacBook 刘海左侧，实时显示 AI 编程助手的状态。
 
 | 灯色 | 含义 |
 |---|---|
@@ -188,13 +224,18 @@ npx skillsadd fengyiqicoder/lights-hooks
 | 操作 | 怎么做 |
 |---|---|
 | 显示 / 隐藏浮窗 | 菜单栏图标 → *Show / Hide Window* |
-| 打开 Setup | 菜单栏图标 → *Setup Hooks…*，或右键浮动灯窗口 |
+| 打开设置 | 菜单栏图标 → *Settings & Hooks…*，或右键状态灯 |
+| 切换显示模式 | 设置 → *Display mode* → *Floating corner* / *Left of notch* / *Conversation lights* |
+| 设置活跃保留时间 | 设置 →「空闲多久后移除灯」→ 输入 1–1440 分钟，默认 30，自动保存并立即生效 |
+| 调整灯亮度 | 设置 →「灯的亮度」滑块 → 20%–100%，默认 100%，所有模式立即生效并自动保存 |
 | 切换尺寸 | 右键浮窗 → *Size ▸*（Small / Medium / Large） |
 | 手动控制 | 点任意一盏灯锁定颜色，或用下面的 HTTP 接口 |
 | 移动位置 | 拖住灯窗口深色背景 |
 | 退出 | 菜单栏图标 → *Quit Lights* |
 
 ### HTTP 控制
+
+Lights 每次启动默认进入 *Conversation lights* 多灯模式，启动后仍可切换其他模式。此模式在刘海左侧为每个活跃本地 Codex 对话显示一盏灯，按侧栏的置顶、项目及聊天顺序从左到右排列。「活跃对话」指正在执行、等待审批，或任务完成后空闲未满设定时间的对话。悬停可查看对话标题；等待审批为黄色闪烁，工作为红色呼吸，完成后绿色闪烁提示再常亮。空闲连续达到设置的分钟数且没有新任务才移除，不需要等归档；新任务复用同一盏灯并重新计时，执行与等待审批期间不会超时移除。重启 Lights 后重新收集参与任务的对话，保留时间设置不变。没有活跃对话时显示一盏绿色待机灯。
 
 ```bash
 curl localhost:9876/executing   # → 红

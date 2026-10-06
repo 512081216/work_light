@@ -22,3 +22,5 @@ xcuserdata/
 # Editors
 .vscode/
 .idea/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
