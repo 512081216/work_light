@@ -173,7 +173,8 @@ private struct ToolRow: View {
     @ViewBuilder
     private var badge: some View {
         switch state.status {
-        case .configured:             dot(.green)
+        // Configuration presence is not proof of Codex hook trust/activation.
+        case .configured:             dot(state.tool.id == "codex-cli" ? .orange : .green)
         case .toolPresentHookMissing: dot(.orange)
         case .toolNotInstalled:       dot(.gray)
         case .unknown:                dot(.red)

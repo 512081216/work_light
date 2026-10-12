@@ -629,12 +629,14 @@ struct LightView: View {
     let onTap: () -> Void
 
     @State private var pulse: CGFloat = 1.0
-    @State private var alertPulse = false
-    @State private var breathPulse = false
     @State private var completionFlash = false
-    @State private var completionFlashGeneration = 0
+    @State private var completionFlashTask: Task<Void, Never>?
 
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30,
+                                paused: !isBreathing && !isAlerting)) { timeline in
+        let illumination = LightIllumination.sample(at: timeline.date.timeIntervalSinceReferenceDate,
+            breathing: isBreathing, alerting: isAlerting, completionFlash: completionFlash)
         ZStack {
             // Socket (the dark well the bulb sits in)
             Circle()
@@ -685,83 +687,62 @@ struct LightView: View {
                         .blur(radius: 0.4)
                 )
                 .brightness(isOn ? 0.06 : 0)
-                .shadow(color: isOn ? palette.glow : .clear, radius: size.glowOuter)
-                .shadow(color: isOn ? palette.glow.opacity(0.85) : .clear, radius: size.glowFar)
-                .opacity(illuminationOpacity * (isOn ? LightPreferences.brightnessFactor(brightness) : 1))
-                .scaleEffect(pulse * illuminationScale)
+                .shadow(color: isOn ? palette.glow.opacity(illumination.glow) : .clear, radius: size.glowOuter)
+                .shadow(color: isOn ? palette.glow.opacity(0.85 * illumination.glow) : .clear, radius: size.glowFar)
+                .opacity(illumination.opacity * (isOn ? LightPreferences.brightnessFactor(brightness) : 1))
+                .scaleEffect(pulse * CGFloat(illumination.scale))
+                .transaction { transaction in
+                    // Steady/flash green has no interpolated animation. This
+                    // No interpolated animation on idle or finite completion flashes.
+                    if !isBreathing && !isAlerting {
+                        transaction.animation = nil
+                        transaction.disablesAnimations = true
+                    }
+                }
+        }
         }
         .contentShape(Circle())
         .onTapGesture {
             pulseAndTap()
         }
-        .onAppear(perform: updateAlertAnimation)
-        .onChange(of: isAlerting) { _, _ in
-            updateAlertAnimation()
+        .onChange(of: isAlerting) { _, alerting in
+            if alerting { stopCompletionFlash() }
         }
-        .onAppear(perform: updateBreathingAnimation)
-        .onChange(of: isBreathing) { _, _ in
-            updateBreathingAnimation()
+        .onChange(of: isBreathing) { _, breathing in
+            if breathing { stopCompletionFlash() }
         }
         .onChange(of: completionFlashID) { _, _ in
             startCompletionFlash()
         }
-    }
-
-    private var illuminationOpacity: Double {
-        if isAlerting { return alertPulse ? 0.22 : 1.0 }
-        if isBreathing { return breathPulse ? 0.78 : 1.0 }
-        if completionFlash { return 0.22 }
-        return 1.0
-    }
-
-    private var illuminationScale: CGFloat {
-        if isAlerting { return 0.94 }
-        if isBreathing { return breathPulse ? 0.96 : 1.0 }
-        if completionFlash { return 0.94 }
-        return 1.0
-    }
-
-    private func updateAlertAnimation() {
-        guard isAlerting else {
-            withAnimation(.easeOut(duration: 0.16)) {
-                alertPulse = false
-            }
-            return
+        .onChange(of: isOn) { _, on in
+            if !on { stopCompletionFlash() }
         }
-
-        alertPulse = false
-        withAnimation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true)) {
-            alertPulse = true
-        }
-    }
-
-    private func updateBreathingAnimation() {
-        guard isBreathing else {
-            withAnimation(.easeOut(duration: 0.20)) {
-                breathPulse = false
-            }
-            return
-        }
-
-        breathPulse = false
-        withAnimation(.easeInOut(duration: 1.20).repeatForever(autoreverses: true)) {
-            breathPulse = true
-        }
+        .onDisappear(perform: stopCompletionFlash)
     }
 
     private func startCompletionFlash() {
-        guard completionFlashID > 0 else { return }
-        completionFlashGeneration += 1
-        let generation = completionFlashGeneration
-        completionFlash = false
-        withAnimation(.easeInOut(duration: 0.28).repeatForever(autoreverses: true)) {
-            completionFlash = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            guard completionFlashGeneration == generation else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                completionFlash = false
+        stopCompletionFlash()
+        guard completionFlashID > 0, isOn, !isBreathing, !isAlerting else { return }
+        completionFlashTask = Task { @MainActor in
+            for phase in CompletionFlashProfile.phases {
+                guard !Task.isCancelled else { return }
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { completionFlash = phase }
+                do { try await Task.sleep(nanoseconds: CompletionFlashProfile.phaseNanoseconds) }
+                catch { return }
             }
+            completionFlash = false
+        }
+    }
+
+    private func stopCompletionFlash() {
+        completionFlashTask?.cancel()
+        completionFlashTask = nil
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            completionFlash = false
         }
     }
 

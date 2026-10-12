@@ -13,8 +13,8 @@ final class CodexIntegration: ToolIntegration {
         switch detectStatus() {
         case .toolNotInstalled:        return "Not installed"
         case .toolPresentHookMissing:  return "Installed — Lights hook missing"
-        case .configured:              return "Hooks configured ✓"
-        case .unknown(let why):        return "Error: \(why)"
+        case .configured:              return "Hooks written — review /hooks in Codex"
+        case .unknown(let why):        return why
         }
     }
 
@@ -49,13 +49,12 @@ final class CodexIntegration: ToolIntegration {
         // ephemeral build directory.
         try installHookRuntime()
 
-        // 2. hooks.json — remove legacy global curls, then merge the
-        // session/turn-aware hook.
+        // 2. Preserve handler/group positions: Codex's trust keys include both
+        // indices. Removing/reinserting our handlers invalidates trusted hooks
+        // (including other tools sharing the same matcher group).
         _ = try JSONHookMerger.backup(hooksPath)
         var dict = try JSONHookMerger.readJSON(hooksPath)
-        JSONHookMerger.removeMatching(&dict,
-            fragments: JSONHookMerger.lightsCommandFragments)
-        JSONHookMerger.merge(into: &dict, specs: JSONHookMerger.codexHookSpecs)
+        JSONHookMerger.mergeCodexPreservingPositions(into: &dict)
         try JSONHookMerger.writeJSON(dict, to: hooksPath)
 
         // 3. config.toml — ensure `features.hooks = true`

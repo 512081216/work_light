@@ -103,6 +103,42 @@ enum JSONHookMerger {
 
     // MARK: - Merge
 
+    /// Never remove/reappend existing Codex handlers during reinstall. A
+    /// definition change still requires explicit review in Codex; we do not
+    /// write hooks.state or manufacture trusted_hash values.
+    static func mergeCodexPreservingPositions(into settings: inout [String: Any]) {
+        var hooks = settings["hooks"] as? [String: Any] ?? [:]
+        for spec in codexHookSpecs {
+            var groups = hooks[spec.event] as? [[String: Any]] ?? []
+            var found = false
+            for groupIndex in groups.indices {
+                var handlers = groups[groupIndex]["hooks"] as? [[String: Any]] ?? []
+                for handlerIndex in handlers.indices {
+                    let command = handlers[handlerIndex]["command"] as? String ?? ""
+                    guard lightsCommandFragments.contains(where: command.contains) else { continue }
+                    found = true
+                    // No-op for the current definition, including its existing
+                    // timeout/matcher: leave a trusted definition byte-for-byte.
+                    if command != spec.command {
+                        handlers[handlerIndex] = ["type": "command", "command": spec.command,
+                                                  "timeout": spec.timeout]
+                    }
+                }
+                groups[groupIndex]["hooks"] = handlers
+            }
+            if !found {
+                var group: [String: Any] = ["hooks": [["type": "command",
+                    "command": spec.command, "timeout": spec.timeout]]]
+                if let matcher = spec.matcher { group["matcher"] = matcher }
+                // A separate appended group avoids modifying another tool's
+                // trusted group or shifting any existing handler index.
+                groups.append(group)
+            }
+            hooks[spec.event] = groups
+        }
+        settings["hooks"] = hooks
+    }
+
     /// Merge specs into settings["hooks"]. Idempotent (skips duplicate commands).
     static func merge(into settings: inout [String: Any], specs: [HookSpec]) {
         var hooks = settings["hooks"] as? [String: Any] ?? [:]

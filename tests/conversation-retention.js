@@ -8,7 +8,7 @@ async function snapshot(active, extra = {}) {
   const response = await fetch(base + '/codex-snapshot', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ source: 'codex-jsonl', active,
-      sidebar_order: ['b', 'a'], titles: { a: 'A', b: 'B' }, ...extra }),
+      sidebar_order: ['b', 'a'], titles: { a: 'A', b: 'B', 'approval-test': 'Approval' }, ...extra }),
   });
   assert.equal(response.status, 200);
 }

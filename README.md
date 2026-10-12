@@ -8,11 +8,13 @@
 
 | 灯光 | 状态 | 效果 |
 |---|---|---|
-| 🔴 红灯 | 正在执行任务 | 呼吸灯 |
-| 🟡 黄灯 | 检测到审批或输入等待 | 持续闪烁，直到对应等待解除 |
-| 🟢 绿灯 | 空闲或任务完成 | 从红灯切换时闪烁约 3 秒，再常亮 |
+| 🔴 红灯 | 正在执行任务 | 约 2.8 秒一轮的平滑呼吸，亮度在用户设定值的 32%–100% 之间变化，光晕同步收放 |
+| 🟡 黄灯 | 检测到审批或等待用户回答问题 | 持续闪烁，直到审批解除、问题被回答/跳过或任务完成 |
+| 🟢 绿灯 | 空闲或任务完成 | 不呼吸；从红灯切换时闪烁 6 次（约 3 秒），然后常亮 |
 
 单灯显示所有已跟踪 Codex 对话的汇总状态，优先级为：等待审批 > 正在执行 > 空闲。多灯模式分别显示每个对话的状态。
+
+任务进行中的异步问题卡片也属于需要人工处理：即使 `request_user_input_async` 已返回 `accepted: true`，或后台任务继续执行，只要问题还未回答，仍显示闪烁黄灯。任务完成后，即使问题未回答，也会清除该任务的问题等待状态，恢复正常空闲显示。监视器按真实 `questionItemId` 匹配回答与跳过；多个问题需分别解除，不会把其他对话的问题一起清除。
 
 ## 显示模式与设置
 
@@ -32,11 +34,14 @@
 
 - 任务完成不会立即隐藏灯：绿灯提示后继续常亮。
 - 空闲达到设置的时间、期间没有新任务，才移除对话的灯；不需要等归档。
+- 空闲时间以日志中的真实任务活动时间计算；重启 Lights、重连转发器或重复心跳不会为旧任务重新开始计时。
 - 新任务复用同一对话的灯，并在任务完成后重新计算空闲时间。
 - 执行或等待审批期间不会因空闲期限到达而移除。
 - 没有活跃对话时显示一盏待机灯；重启 Lights 后重新收集对话，亮度和保留时间设置不变。
 
 桌面监视器参考置顶、项目、聊天排序设置，并排除子代理对话。刘海模式使用固定紧凑尺寸；没有刘海时回退到屏幕顶部中间偏左的位置。
+
+运行时转发器的状态也必须匹配桌面监视器提供的顶层聊天名单，内部子代理、Guardian 等后台会话不单独显示灯，也不参与单灯汇总。仅收到一个未知会话 ID 的执行通知，不会凭空新增灯。
 
 ## 系统要求
 
@@ -64,12 +69,47 @@ open Lights.app
 首次启动会打开设置。找到 **Codex CLI**，点击 **Install**。安装逻辑会：
 
 1. 将 `Resources/lights-codex-hook.js` 安装到 `~/.codex/lights-codex-hook.js`。
-2. 合并 `~/.codex/hooks.json` 中的 Lights 生命周期 hooks，替换旧的全局通知。
+2. 合并 `~/.codex/hooks.json` 中的 Lights 生命周期 hooks；重新安装时原位更新，保留已有钩子的位置和定义，避免无故使审核记录失效。
 3. 在 `~/.codex/config.toml` 中尝试启用 `features.hooks = true`。
 
 hook 传递会话、任务和可用的工具调用标识，避免不同对话、旧任务与并行工具相互覆盖状态。JSON hook 配置写入前生成带时间戳的备份，并保留其他 hooks。
 
-实际事件是否发出取决于 Codex 版本。**Hooks configured ✓** 只表示检测到配置，不代表所有桌面审批类型都已实测。更新应用内的 hook 脚本后，可重新安装以更新稳定路径下的运行脚本。
+**写入配置不等于钩子已启用。** 安装后，打开 Codex CLI，输入 `/hooks`，审核并信任命令包含 `lights-codex-hook.js` 的钩子。定义修改后需要重新审核；不要手工伪造 `trusted_hash`。设置页显示“Hooks written — review /hooks in Codex”及橙色标记，避免把配置存在误认为运行正常。更新应用内的 hook 脚本后，可重新安装以更新稳定路径下的运行脚本。
+
+运行只读诊断，直接查询 Codex 的 `hooks/list`（需要当前 Codex CLI 支持该接口）：
+
+```bash
+node tools/check-codex-hooks.js
+```
+
+输出 `ready: true` 表示所需 6 个 Lights 钩子均存在、启用且已信任。`modified` 或 `untrusted` 的钩子不会执行，请通过 `/hooks` 重新审核。诊断不修改审批策略或信任记录；它会启动短暂的本地 app-server，因此 Codex 数据目录需可写。此结果验证 CLI 当前配置，不保证已运行的桌面进程已重新加载，也不保证每类插件授权都有对应 hook。
+
+### 精确监测桌面版审批：只读运行时转发器
+
+MCP / App 工具授权可能不触发 `PermissionRequest` hook，也不会写入 JSONL。因此仅安装 hooks 和日志监视器不能保证识别全部审批。
+
+`tools/codex-runtime-bridge.js` 透传真实 app-server 的标准输入、输出和错误流，监听 `waitingOnApproval`、`waitingOnUserInput`、真实审批请求、处理结果及任务结束事件。只向本机 Lights 发送会话标识、状态和修订号；不保存工具参数、不代替用户审批、不修改审批策略。
+
+首次启用：
+
+1. 先运行新版 Lights，并保留原桌面监视器用于标题、排序和断线回退。
+2. 保存并结束正在执行的任务，手动完全退出 Codex 桌面应用。
+3. 从源码目录执行：
+
+```bash
+chmod +x tools/codex-runtime-bridge.sh tools/launch-codex-with-lights.sh
+./tools/launch-codex-with-lights.sh
+```
+
+启动脚本通过 `CODEX_CLI_PATH` 为本次桌面启动指定转发器；不会终止已运行的桌面进程，也不修改应用包。当前机器桌面程序为 `/Applications/ChatGPT.app`，底层是 Codex；脚本同时支持旧的 `/Applications/Codex.app` 路径。转发器默认使用当前机器内置 CLI；旧路径或自定义安装需要设置 `LIGHTS_CODEX_REAL_BINARY` 指向真实 CLI，且不得指向转发器本身。Node 查找优先 Homebrew，其次当前机器的 nvm 路径，再查找 PATH。
+
+运行时状态优先于 JSONL 推测，审批会保持黄灯直到实际解除。心跳超过 5 秒失效时回退到 hooks / JSONL；空闲心跳不延长灯的保留期限。转发器不会向 app-server 发送额外请求，所以启动前已有的审批需等待真实状态通知，不能承诺立即补齐。
+
+实时 `thread/status/changed` 报告不再等待审批/输入时，会清理对应会话的过期请求记录；先前发出的 `thread/read` / `thread/resume` 查询若晚于新事件返回，不再覆盖当前状态。更新转发器后，需要结束其他任务并完全退出桌面程序，再通过启动脚本重新打开；只重启 Lights 不会更新已加载的转发器。
+
+每次需要精确审批监测时都用此脚本启动。退出后按正常方式启动桌面应用即可停用转发器；没有开机自动启用或全局环境变量更改。
+
+验证：`node tests/runtime-bridge.js`、`node tests/runtime-passthrough.js`；接收端测试 `node tests/runtime-server.js /path/to/retention-test-server`。
 
 ### 启动 Codex 桌面监视器
 
@@ -102,6 +142,8 @@ LIGHTS_CODEX_HOME="/path/to/codex-data" node lights-codex-desktop-watcher.js
 ## 监控逻辑与限制
 
 Lights 根据事件判断状态，不用“文件最近被修改”推断任务仍在执行。任务完成、中止记录用于结束红灯；会话快照用于校正遗漏或过期状态。
+
+监视器也会按工具调用编号核对已经完成的结果，用于解除遗漏 `PostToolUse` 的旧审批记录；不按超时强制解除等待，也不清除其他并行审批。`/diagnostics` 是本机只读状态来源接口，仅返回会话标识、状态与审批计数，不包含工具参数。
 
 审批跟踪包括显式权限申请、用户输入工具及可识别的提权调用。执行单元返回 `Script running with cell ID …` 时，监视器继续跟踪后续 `wait`，不会把临时返回当作审批结束。官方 hook 提供调用标识时，只由匹配结果解除对应审批，不由无关并行输出清除。
 
@@ -140,6 +182,7 @@ curl -s http://127.0.0.1:9876/sessions
 swift build --disable-sandbox -c release --arch arm64
 
 # 检查 JavaScript 并验证审批跟踪
+node tests/hook-health.js
 node --check Resources/lights-codex-hook.js
 node --check lights-codex-desktop-watcher.js
 node tests/approval-watcher.js
@@ -169,7 +212,7 @@ node tests/conversation-retention.js .build/retention-test-server
 
 **审批时没有黄灯，或审批结束仍是黄灯**
 
-确认后台已重启到新代码，记录当时的工具名称、审批类型和 `/sessions` 结果。显式权限申请、插件授权、异步输入不是相同事件，排查时需区分；不要用全局 `/permission` 替代真实事件链验证。
+先运行 `node tools/check-codex-hooks.js`。若审批钩子是 `modified` 或 `untrusted`，在 Codex CLI `/hooks` 中重新审核 Lights 钩子，再重启 Codex 桌面应用加载配置（先等待其他任务结束）。之后检查后台是否已重启到新代码，记录工具名称、审批类型和 `/sessions` 结果。显式权限申请、插件授权、异步输入不是相同事件，排查时需区分；不要用全局 `/permission` 替代真实事件链验证。
 
 **完成后绿灯一直保留**
 

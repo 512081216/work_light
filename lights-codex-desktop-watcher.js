@@ -26,8 +26,10 @@ const rolloutCache = new Map();
 function newRolloutState() {
   return {
     offset: 0, carry: Buffer.alloc(0), activeTask: false,
-    activeTaskTurnId: null, lastActivityAt: 0,
+    activeTaskTurnId: null, lastActivityAt: 0, lastTaskAt: 0,
     pendingCalls: new Set(), pendingCells: new Map(), waitCalls: new Map(),
+    completedCalls: new Set(),
+    asyncQuestionCandidates: new Map(), pendingQuestions: new Set(),
     lastEvent: null, lastSentKey: null,
   };
 }
@@ -64,9 +66,10 @@ function notifyEvent(file, event, stateName, turnId = null) {
   }
 }
 
-function notifySnapshot(active, threads) {
+function notifySnapshot(active, threads, activityAt, pendingQuestions, completedCalls) {
   const body = JSON.stringify({
-    source: "codex-jsonl", active,
+    source: "codex-jsonl", active, activity_at: activityAt, pending_questions: pendingQuestions,
+    completed_calls: completedCalls,
     sidebar_order: threads.map(t => t.id),
     titles: Object.fromEntries(threads.map(t => [t.id, t.title])),
   });
@@ -174,7 +177,7 @@ function inspectRollout(file) {
     return null;
   }
 
-  const waiting = state.activeTask && state.pendingCalls.size > 0;
+  const waiting = state.pendingQuestions.size > 0 || (state.activeTask && state.pendingCalls.size > 0);
   const activeAgeMs = state.lastActivityAt
     ? Date.now() - state.lastActivityAt : ageMs;
   return {
@@ -185,6 +188,7 @@ function inspectRollout(file) {
     // must never resurrect a turn that already emitted task_complete.
     active: state.activeTask,
     waiting,
+    pendingQuestion: state.pendingQuestions.size > 0,
     lastEvent: state.lastEvent,
   };
 }
@@ -202,12 +206,63 @@ function inspectRecord(line, state) {
   const parsedTimestamp = Date.parse(record.timestamp);
   const occurredAt = Number.isFinite(parsedTimestamp) ? parsedTimestamp : Date.now();
 
+  // Async question tools return {accepted:true} before the user responds.
+  // Keep a separate ledger keyed by questionItemId, not the tool's lifetime.
+  const consumeReply = message => {
+    if (message.type !== "message" || message.role !== "user") return;
+    const text = (message.content || []).map(item => item.text || "").join("\n");
+    const match = text.match(/<send_user_message_question_reply>([\s\S]*?)<\/send_user_message_question_reply>/);
+    if (!match) {
+      // A new ordinary user request supersedes questions from the previous
+      // interaction. Do not replay old, abandoned cards from months of history.
+      // Product-generated context records are not new user requests.
+      if (text.trim() && !/^\s*<(environment_context|external_codex_apps_open_page)\b/.test(text)
+          && !text.startsWith("# AGENTS.md instructions")) {
+        state.pendingQuestions.clear();
+        state.asyncQuestionCandidates.clear();
+      }
+      return;
+    }
+    try {
+      for (const reply of JSON.parse(match[1])) {
+        const id = JSON.parse(reply.questionItemId);
+        if (Array.isArray(id) && id[0] === "request_user_input_async")
+          state.pendingQuestions.delete(JSON.stringify(id)); // Empty/skipped answers also resolve.
+      }
+    } catch { /* Unstructured user text is not a question resolution. */ }
+  };
+  if (record.type === "response_item") consumeReply(payload);
+  if (record.type === "compacted" && Array.isArray(payload.replacement_history))
+    payload.replacement_history.forEach(consumeReply);
+  if (record.type === "response_item" && payload.type === "function_call"
+      && String(payload.name || "").split(".").pop() === "request_user_input_async") {
+    try {
+      const questions = JSON.parse(payload.arguments || "{}").questions;
+      if (Array.isArray(questions) && questions.length > 0 && questions.length <= 100)
+        state.asyncQuestionCandidates.set(payload.call_id, questions.length);
+    } catch { /* Only a structured real tool call may create a question. */ }
+  }
+  if (record.type === "response_item" && payload.type === "function_call_output"
+      && state.asyncQuestionCandidates.has(payload.call_id)) {
+    const count = state.asyncQuestionCandidates.get(payload.call_id);
+    state.asyncQuestionCandidates.delete(payload.call_id);
+    try {
+      const result = typeof payload.output === "string" ? JSON.parse(payload.output) : payload.output;
+      if (result?.accepted === true) {
+        for (let index = 0; index < count; index++)
+          state.pendingQuestions.add(JSON.stringify(["request_user_input_async", payload.call_id, index]));
+      }
+    } catch { /* Failed/rejected calls must not leave a waiting lamp. */ }
+  }
+
   if (payload.type === "task_started") {
+    state.lastTaskAt = occurredAt;
     state.activeTask = true;
     state.activeTaskTurnId = turnId || `jsonl-open-${occurredAt}`;
     state.pendingCalls.clear();
     state.pendingCells.clear();
     state.waitCalls.clear();
+    state.completedCalls.clear();
     state.lastActivityAt = occurredAt;
     state.lastEvent = {
       event: "event_msg:task_started",
@@ -216,6 +271,14 @@ function inspectRecord(line, state) {
     };
   }
   if (payload.type === "task_complete" || payload.type === "turn_aborted") {
+    // Completion ends this task's need for input, even if its card remains
+    // unanswered. Discard unaccepted candidates too so late outputs cannot
+    // reopen the completed task's question indicator.
+    state.asyncQuestionCandidates.clear();
+    if (payload.type === "task_complete") {
+      state.pendingQuestions.clear();
+    }
+    state.lastTaskAt = occurredAt;
     state.activeTask = false;
     state.activeTaskTurnId = null;
     state.pendingCalls.clear();
@@ -253,6 +316,10 @@ function inspectRecord(line, state) {
     const callId = payload.call_id || "unknown";
     const output = typeof payload.output === "string" ? payload.output : JSON.stringify(payload.output || "");
     const runningCell = output.match(/Script running with cell ID\s+([\w-]+)/)?.[1];
+    if (!runningCell && callId !== "unknown") {
+      state.completedCalls.add(callId);
+      if (state.completedCalls.size > 512) state.completedCalls.delete(state.completedCalls.values().next().value);
+    }
     if (state.pendingCalls.has(callId)) {
       if (runningCell) state.pendingCells.set(runningCell, callId);
       else state.pendingCalls.delete(callId);
@@ -260,12 +327,14 @@ function inspectRecord(line, state) {
     const waitedCell = state.waitCalls.get(callId);
     if (waitedCell) {
       if (!runningCell) {
-        state.pendingCalls.delete(state.pendingCells.get(waitedCell));
+        const originalCall = state.pendingCells.get(waitedCell);
+        if (originalCall) state.completedCalls.add(originalCall);
+        state.pendingCalls.delete(originalCall);
         state.pendingCells.delete(waitedCell);
       }
       state.waitCalls.delete(callId);
     }
-    const waiting = state.pendingCalls.size > 0;
+    const waiting = state.pendingCalls.size > 0 || state.pendingQuestions.size > 0;
     state.lastEvent = { event: waiting ? "PermissionRequest" : "PostToolUse",
       state: waiting ? "permission" : "executing", turnId: turnId || state.activeTaskTurnId };
   }
@@ -303,10 +372,19 @@ function refresh() {
   if (files === null) return;
 
   const activeBySession = new Map();
+  const activityAt = {};
+  const pendingQuestions = [];
+  const completedCalls = {};
   for (const thread of files) {
     const file = thread.rollout_path;
     const state = inspectRollout(file);
     if (!state) continue;
+    const cached = rolloutCache.get(file);
+    if (cached?.lastTaskAt > 0) activityAt[thread.id] = cached.lastTaskAt;
+    // Only open turns can retain approvals. Keep historical results out of
+    // the snapshot so old conversations cannot inflate its request size.
+    if (state.active && cached?.completedCalls.size) completedCalls[thread.id] = [...cached.completedCalls];
+    if (state.pendingQuestion) pendingQuestions.push(thread.id);
 
     // Only recent files may contribute fallback state. Never replay an old
     // task_complete into the currently active Codex session.
@@ -331,7 +409,7 @@ function refresh() {
       }
     }
   }
-  notifySnapshot(Array.from(activeBySession.values()), files);
+  notifySnapshot(Array.from(activeBySession.values()), files, activityAt, pendingQuestions, completedCalls);
 }
 
 function stop() {

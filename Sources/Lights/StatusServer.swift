@@ -42,12 +42,29 @@ final class StatusServer {
         var jsonlActiveTurnID: String?
         var generation: Int
         var lastEventAt: Date
+        var taskActivityAt: Date? = nil
         var awaitingOfficialApproval = false
         var pendingOfficialApprovalKeys: Set<String> = []
     }
 
     private var codexSessions: [String: CodexSession] = [:]
+    private struct RuntimeState {
+        let state: LightsState
+        let revision: Int
+        let observedAt: Date
+    }
+    private struct RuntimeStream {
+        let heartbeat: Date
+        let entries: [String: RuntimeState]
+    }
+    private var runtimeStreams: [String: RuntimeStream] = [:]
+    private var runtimeTimer: DispatchSourceTimer?
     private var sidebarOrder: [String] = []
+    // The desktop watcher supplies the complete visible top-level roster.
+    // Runtime notifications also include internal/guardian/subagent threads;
+    // they must never create additional user conversation lamps.
+    private var visibleConversationIDs: Set<String>?
+    private var pendingQuestionIDs: Set<String> = []
     private var sessionTitles: [String: String] = [:]
     private var codexIdleWork: [String: DispatchWorkItem] = [:]
     private let codexStopGracePeriod: TimeInterval = 5
@@ -82,6 +99,24 @@ final class StatusServer {
                 self?.handle(conn)
             }
             listener.start(queue: .global(qos: .utility))
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.stateLock.lock()
+                let hadRuntime = !self.runtimeStreams.isEmpty
+                self.runtimeStreams = self.runtimeStreams.filter {
+                    Date().timeIntervalSince($0.value.heartbeat) < 5
+                }
+                // Expire idle conversation views even without any new events.
+                // Preserve legacy/global state when no runtime owns it.
+                let state = hadRuntime ? self.codexAggregateLocked() : self.currentState
+                self.currentState = state
+                self.stateLock.unlock()
+                self.publishState(state)
+            }
+            runtimeTimer = timer
+            timer.resume()
             NSLog("[Lights] StatusServer listening on 127.0.0.1:\(port.rawValue)")
         } catch {
             NSLog("[Lights] StatusServer failed to start: \(error)")
@@ -170,6 +205,8 @@ final class StatusServer {
             return handleCodexEvent(body)
         case "/codex-snapshot":
             return handleCodexSnapshot(body)
+        case "/codex-runtime-snapshot":
+            return handleRuntimeSnapshot(body)
         case "/status":
             return Response(status: "200 OK", body: currentStateSnapshot().rawValue)
         case "/sessions":
@@ -178,6 +215,29 @@ final class StatusServer {
             stateLock.unlock()
             let json = sessions.map { ["id": $0.id, "title": $0.title, "state": $0.state.rawValue] }
             let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("[]".utf8)
+            return Response(status: "200 OK", body: String(decoding: data, as: UTF8.self))
+        case "/diagnostics":
+            stateLock.lock()
+            let diagnostics: [[String: Any]] = codexSessions.compactMap { id, session in
+                guard isVisibleConversationLocked(id, session: session) else { return nil }
+                let runtime = runtimeStateLocked(id)
+                return ["id": id, "fallback": session.state.rawValue,
+                        "effective": effectiveStateLocked(id, fallback: session.state).rawValue,
+                        "runtime": runtime?.state.rawValue ?? "none",
+                        "runtime_revision": runtime?.revision ?? 0,
+                        "runtime_streams": runtimeStreams.compactMap { streamID, stream -> [String: Any]? in
+                            guard let entry = stream.entries[id] else { return nil }
+                            return ["stream": streamID, "state": entry.state.rawValue,
+                                    "revision": entry.revision,
+                                    "heartbeat_age": Date().timeIntervalSince(stream.heartbeat),
+                                    "state_age": Date().timeIntervalSince(entry.observedAt)]
+                        },
+                        "pending_question": pendingQuestionIDs.contains(id),
+                        "official_approval_count": session.pendingOfficialApprovalKeys.count,
+                        "jsonl_active": session.jsonlActiveTurnID != nil]
+            }
+            stateLock.unlock()
+            let data = (try? JSONSerialization.data(withJSONObject: diagnostics)) ?? Data("[]".utf8)
             return Response(status: "200 OK", body: String(decoding: data, as: UTF8.self))
         case "/snapshot":
             return Response(status: "200 OK", body: snapshotPNG() ?? "error")
@@ -319,6 +379,9 @@ final class StatusServer {
             stateLock.unlock()
             return Response(status: "200 OK", body: "stale")
         }
+        if source != "codex-jsonl", isStart, session.currentTurnID != turnID || session.state == .idle {
+            session.taskActivityAt = now
+        }
 
         if source == "codex-jsonl" {
             session.hasJSONLActivity = true
@@ -369,7 +432,10 @@ final class StatusServer {
                 ? .executing : .idle
             if session.awaitingOfficialApproval { session.state = .permission }
         } else if isPermission {
-            if source == "codex-official" {
+            // PreToolUse is only a prediction: escalation may be accepted
+            // automatically without any human decision. Latch only an actual
+            // PermissionRequest, not every permission-coloured tool start.
+            if source == "codex-official", event == "PermissionRequest" {
                 session.pendingOfficialApprovalKeys.insert(approvalKey)
                 session.awaitingOfficialApproval = true
             }
@@ -469,6 +535,20 @@ final class StatusServer {
         let now = Date()
         if let order = json["sidebar_order"] as? [String] { sidebarOrder = order }
         if let titles = json["titles"] as? [String: String] { sessionTitles = titles }
+        if let questions = json["pending_questions"] as? [String] {
+            pendingQuestionIDs = Set(questions)
+            for id in pendingQuestionIDs where codexSessions[id] == nil {
+                codexSessions[id] = CodexSession(currentTurnID: nil, terminalTurnID: nil,
+                    closedTurnIDs: [], state: .idle, hadToolUse: false,
+                    hasJSONLActivity: true, jsonlActiveTurnID: nil,
+                    generation: 1, lastEventAt: now)
+            }
+        }
+        if let titles = json["titles"] as? [String: String] {
+            visibleConversationIDs = Set(titles.keys)
+        } else if let order = json["sidebar_order"] as? [String] {
+            visibleConversationIDs = Set(order)
+        }
         for sessionID in Array(codexSessions.keys) {
             guard var session = codexSessions[sessionID],
                   session.hasJSONLActivity || activeBySession[sessionID] != nil else { continue }
@@ -486,6 +566,15 @@ final class StatusServer {
                 session.currentTurnID = active.turnID
                 session.terminalTurnID = nil
                 session.jsonlActiveTurnID = active.turnID
+                // An observed result proves this exact call is no longer
+                // awaiting approval, even if its official PostToolUse was
+                // dropped. Never clear unrelated or anonymous approvals.
+                if let completed = (json["completed_calls"] as? [String: [String]])?[sessionID] {
+                    for callID in completed.prefix(512) {
+                        session.pendingOfficialApprovalKeys.remove("call:\(callID)")
+                    }
+                    session.awaitingOfficialApproval = !session.pendingOfficialApprovalKeys.isEmpty
+                }
                 session.state = session.awaitingOfficialApproval ? .permission : active.state
             } else {
                 session.awaitingOfficialApproval = false
@@ -512,6 +601,19 @@ final class StatusServer {
             )
         }
 
+        // Recover real task timestamps after Lights/watcher restarts. Merely
+        // observing an old idle thread must not start a fresh retention period.
+        if let activity = json["activity_at"] as? [String: NSNumber] {
+            for (id, value) in activity {
+                let date = Date(timeIntervalSince1970: value.doubleValue / 1000)
+                guard value.doubleValue.isFinite, date.timeIntervalSince1970 > 0,
+                      date <= now.addingTimeInterval(60), var session = codexSessions[id] else { continue }
+                if session.taskActivityAt == nil || date > session.taskActivityAt! {
+                    session.taskActivityAt = date
+                }
+                codexSessions[id] = session
+            }
+        }
         let aggregate = codexAggregateLocked()
         currentState = aggregate
         stateLock.unlock()
@@ -525,10 +627,72 @@ final class StatusServer {
         return trimmed.isEmpty ? nil : String(trimmed.prefix(256))
     }
 
+    // Live app-server state overrides heuristics only while its bridge is alive.
+    // Heartbeats do not renew completed conversation retention.
+    private func handleRuntimeSnapshot(_ body: String) -> Response {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let streamID = normalizedIdentifier(json["stream_id"]),
+              let entries = json["sessions"] as? [[String: Any]], entries.count <= 1024 else {
+            return Response(status: "400 Bad Request", body: "invalid runtime snapshot")
+        }
+        stateLock.lock()
+        let now = Date()
+        let previous = runtimeStreams[streamID]?.entries ?? [:]
+        var states: [String: RuntimeState] = [:]
+        for entry in entries {
+            guard let id = normalizedIdentifier(entry["session_id"]),
+                  let raw = entry["state"] as? String,
+                  let state = LightsState(rawValue: raw), state != .off,
+                  let revision = entry["revision"] as? Int else { continue }
+            let old = previous[id]
+            states[id] = RuntimeState(state: state, revision: revision,
+                                      observedAt: old?.revision == revision ? old!.observedAt : now)
+            if var session = codexSessions[id] {
+                if state == .idle, old != nil, old?.state != .idle {
+                    session.taskActivityAt = now
+                }
+                if old?.revision != revision { session.lastEventAt = now }
+                codexSessions[id] = session
+            } else {
+                codexSessions[id] = CodexSession(currentTurnID: nil, terminalTurnID: nil,
+                    closedTurnIDs: [], state: .idle, hadToolUse: false,
+                    hasJSONLActivity: false, jsonlActiveTurnID: nil,
+                    generation: 0, lastEventAt: now)
+            }
+        }
+        if states.isEmpty { runtimeStreams.removeValue(forKey: streamID) }
+        else { runtimeStreams[streamID] = RuntimeStream(heartbeat: now, entries: states) }
+        let aggregate = codexAggregateLocked()
+        currentState = aggregate
+        stateLock.unlock()
+        publishState(aggregate)
+        return Response(status: "200 OK", body: aggregate.rawValue)
+    }
+
+    private func effectiveStateLocked(_ id: String, fallback: LightsState) -> LightsState {
+        if pendingQuestionIDs.contains(id) { return .permission }
+        return runtimeStateLocked(id)?.state ?? fallback
+    }
+
+    private func runtimeStateLocked(_ id: String) -> RuntimeState? {
+        runtimeStreams.values.filter { Date().timeIntervalSince($0.heartbeat) < 5 }
+            .compactMap { $0.entries[id] }.max { $0.observedAt < $1.observedAt }
+    }
+
     private func codexAggregateLocked() -> LightsState {
-        if codexSessions.values.contains(where: { $0.state == .permission }) { return .permission }
-        if codexSessions.values.contains(where: { $0.state == .executing }) { return .executing }
+        let states = codexSessions.filter { isVisibleConversationLocked($0.key, session: $0.value) }
+            .map { effectiveStateLocked($0.key, fallback: $0.value.state) }
+        if states.contains(.permission) { return .permission }
+        if states.contains(.executing) { return .executing }
         return .idle
+    }
+
+    private func isVisibleConversationLocked(_ id: String, session: CodexSession) -> Bool {
+        if let visibleConversationIDs { return visibleConversationIDs.contains(id) }
+        // Before the first roster arrives, runtime-only identities are not
+        // evidence of a user-visible conversation. Hooks/JSONL retain fallback.
+        return session.generation > 0
     }
 
     private func cancelCodexIdleLocked(_ sessionID: String) {
@@ -588,13 +752,16 @@ final class StatusServer {
         let rank = Dictionary(sidebarOrder.enumerated().map { ($0.element, $0.offset) },
                               uniquingKeysWith: { first, _ in first })
         return codexSessions.compactMap { id, session -> ConversationLight? in
+            guard isVisibleConversationLocked(id, session: session) else { return nil }
+            let runtime = runtimeStateLocked(id)
+            let state = effectiveStateLocked(id, fallback: session.state)
             // Execution/approval never expires. Idle snapshots must not reset
             // lastEventAt: only a new task or its completion renews retention.
-            guard session.state == .executing || session.state == .permission
-                    || (session.state == .idle
-                        && now.timeIntervalSince(session.lastEventAt) < conversationIdleRetention)
+            guard state == .executing || state == .permission
+                    || (state == .idle
+                        && now.timeIntervalSince(session.taskActivityAt ?? runtime?.observedAt ?? session.lastEventAt) < conversationIdleRetention)
                 else { return nil }
-            return ConversationLight(id: id, title: sessionTitles[id] ?? id, state: session.state)
+            return ConversationLight(id: id, title: sessionTitles[id] ?? id, state: state)
         }.sorted {
             let a = rank[$0.id] ?? Int.max, b = rank[$1.id] ?? Int.max
             return a == b ? $0.id < $1.id : a < b
